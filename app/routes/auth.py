@@ -4,10 +4,9 @@ Handles user authentication including SAML/SSO login.
 """
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-import secrets
-import string
+
 import redis
 
 logger = logging.getLogger(__name__)
@@ -17,56 +16,64 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import User, PasswordResetToken, UserMFASetting
+from app.models import PasswordResetToken, User, UserMFASetting
 from app.schemas import (
+    ForgotPasswordRequest,
+    MFAChallengeRequest,
+    MFADisableRequest,
+    MFASetupResponse,
+    MFAVerifyRequest,
+    ResetPasswordRequest,
+    SessionInvalidateResponse,
     Token,
     UserCreate,
     UserResponse,
-    ForgotPasswordRequest,
-    ResetPasswordRequest,
-    MFASetupResponse,
-    MFAVerifyRequest,
-    MFAChallengeRequest,
-    MFADisableRequest,
-    SessionInvalidateResponse,
 )
 from app.security import (
     create_access_token,
     create_refresh_token,
-    set_auth_cookies,
-    clear_auth_cookies,
-    get_current_user,
-    generate_csrf_token,
-    hash_password,
-    verify_password,
-    generate_reset_token,
-    hash_reset_token,
-    encode_mfa_session_token,
     decode_mfa_session_token,
+    encode_mfa_session_token,
+    generate_csrf_token,
+    generate_reset_token,
+    get_current_user,
+    hash_password,
+    hash_reset_token,
+    set_auth_cookies,
+    verify_password,
 )
 
 # SAML is optional - import lazily to avoid hard dependency at module load
 SAMLService = None
 SAMLAuthError = None
 
+
 def _get_saml_service():
     """Lazily import SAML service to allow running without python3-saml."""
     global SAMLService, SAMLAuthError
     if SAMLService is None:
         try:
-            from app.services.saml_service import SAMLService as _SAMLService, SAMLAuthError as _SAMLAuthError
+            from app.services.saml_service import SAMLAuthError as _SAMLAuthError
+            from app.services.saml_service import SAMLService as _SAMLService
+
             SAMLService = _SAMLService
             SAMLAuthError = _SAMLAuthError
-        except ImportError as e:
+        except ImportError:
             # Create a stub class that raises a clear error when used
             class _SAMLAuthError(Exception):
                 pass
+
             class _SAMLService:
                 def __init__(self, *args, **kwargs):
-                    raise ImportError("SAML authentication requires python3-saml package. Install with: pip install python3-saml")
+                    raise ImportError(
+                        "SAML authentication requires python3-saml package. "
+                        "Install with: pip install python3-saml"
+                    )
+
             SAMLAuthError = _SAMLAuthError
             SAMLService = _SAMLService
     return SAMLService
+
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -77,12 +84,16 @@ LOCKOUT_DURATION_MINUTES = 15
 def get_redis_client():
     """Get Redis client for rate limiting."""
     if not settings.REDIS_URL:
-        logger.warning("REDIS_URL not configured — auth rate limiting and lockout disabled")
+        logger.warning(
+            "REDIS_URL not configured — auth rate limiting and lockout disabled"
+        )
         return None
     try:
         return redis.from_url(settings.REDIS_URL)
     except Exception as e:
-        logger.warning(f"Redis connection failed — auth rate limiting and lockout disabled: {e}")
+        logger.warning(
+            f"Redis connection failed — auth rate limiting and lockout disabled: {e}"
+        )
         return None
 
 
@@ -137,9 +148,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     try:
         hashed = hash_password(user_data.password)
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     user = User(
         email=user_data.email,
@@ -211,7 +220,8 @@ def reset_password(
         .filter(
             PasswordResetToken.token_hash == hashed,
             PasswordResetToken.used == False,
-            PasswordResetToken.expires_at > datetime.now(tz=timezone.utc).replace(tzinfo=None),
+            PasswordResetToken.expires_at
+            > datetime.now(tz=timezone.utc).replace(tzinfo=None),
         )
         .first()
     )
@@ -240,7 +250,10 @@ def reset_password(
 
 
 def _get_totp_uri(user_email: str, secret: str) -> str:
-    return f"otpauth://totp/{settings.APP_NAME}:{user_email}?secret={secret}&issuer={settings.APP_NAME}"
+    return (
+        f"otpauth://totp/{settings.APP_NAME}:{user_email}"
+        f"?secret={secret}&issuer={settings.APP_NAME}"
+    )
 
 
 @router.post("/mfa/setup", response_model=MFASetupResponse)
@@ -249,12 +262,18 @@ def setup_mfa(
     current_user: User = Depends(get_current_user),
 ):
     """Generate TOTP secret and provisioning URI for authenticator app."""
-    import base64
     import pyotp
 
-    mfa = db.query(UserMFASetting).filter(UserMFASetting.user_id == current_user.id).first()
+    mfa = (
+        db.query(UserMFASetting)
+        .filter(UserMFASetting.user_id == current_user.id)
+        .first()
+    )
     if mfa and mfa.is_enabled:
-        raise HTTPException(status_code=400, detail="MFA is already enabled. Disable it first to re-setup.")
+        raise HTTPException(
+            status_code=400,
+            detail="MFA is already enabled. Disable it first to re-setup.",
+        )
 
     secret = pyotp.random_base32()
     uri = _get_totp_uri(current_user.email, secret)
@@ -283,9 +302,15 @@ def verify_mfa(
     """Verify a TOTP code to confirm MFA setup."""
     import pyotp
 
-    mfa = db.query(UserMFASetting).filter(UserMFASetting.user_id == current_user.id).first()
+    mfa = (
+        db.query(UserMFASetting)
+        .filter(UserMFASetting.user_id == current_user.id)
+        .first()
+    )
     if not mfa or not mfa.totp_secret:
-        raise HTTPException(status_code=400, detail="MFA not set up. Call /mfa/setup first.")
+        raise HTTPException(
+            status_code=400, detail="MFA not set up. Call /mfa/setup first."
+        )
 
     totp = pyotp.TOTP(mfa.totp_secret)
     if not totp.verify(req.code):
@@ -307,7 +332,11 @@ def disable_mfa(
     if not verify_password(req.password, current_user.hashed_password):
         raise HTTPException(status_code=403, detail="Incorrect password")
 
-    mfa = db.query(UserMFASetting).filter(UserMFASetting.user_id == current_user.id).first()
+    mfa = (
+        db.query(UserMFASetting)
+        .filter(UserMFASetting.user_id == current_user.id)
+        .first()
+    )
     if not mfa:
         return {"message": "MFA was not enabled"}
 
@@ -331,12 +360,18 @@ def mfa_challenge(
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="Invalid session or user is inactive")
+        raise HTTPException(
+            status_code=401, detail="Invalid session or user is inactive"
+        )
 
-    mfa = db.query(UserMFASetting).filter(
-        UserMFASetting.user_id == user_id,
-        UserMFASetting.is_enabled == True,
-    ).first()
+    mfa = (
+        db.query(UserMFASetting)
+        .filter(
+            UserMFASetting.user_id == user_id,
+            UserMFASetting.is_enabled == True,
+        )
+        .first()
+    )
     if not mfa or not mfa.totp_secret:
         raise HTTPException(status_code=400, detail="MFA not enabled for this user")
 
@@ -345,17 +380,21 @@ def mfa_challenge(
         raise HTTPException(status_code=400, detail="Invalid MFA code")
 
     csrf_token = generate_csrf_token()
-    access_token = create_access_token(data={
-        "sub": user.email,
-        "user_id": user.id,
-        "role": user.role,
-        "token_version": user.token_version,
-    })
-    refresh_token = create_refresh_token(data={
-        "sub": user.email,
-        "user_id": user.id,
-        "token_version": user.token_version,
-    })
+    access_token = create_access_token(
+        data={
+            "sub": user.email,
+            "user_id": user.id,
+            "role": user.role,
+            "token_version": user.token_version,
+        }
+    )
+    refresh_token = create_refresh_token(
+        data={
+            "sub": user.email,
+            "user_id": user.id,
+            "token_version": user.token_version,
+        }
+    )
 
     set_auth_cookies(response, access_token, refresh_token, csrf_token=csrf_token)
 
@@ -396,7 +435,7 @@ def login(
 ):
     if login_data is None:
         login_data = LoginRequest(email="", password="")
-    
+
     email = login_data.email
     password = login_data.password
 
@@ -415,7 +454,10 @@ def login(
             lockout_account(email)
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Account locked for {LOCKOUT_DURATION_MINUTES} minutes due to too many failed attempts",
+                detail=(
+                    f"Account locked for {LOCKOUT_DURATION_MINUTES} "
+                    "minutes due to too many failed attempts"
+                ),
                 headers={"WWW-Authenticate": "Bearer"},
             )
         raise HTTPException(
@@ -431,10 +473,14 @@ def login(
         )
 
     # Check MFA
-    mfa = db.query(UserMFASetting).filter(
-        UserMFASetting.user_id == user.id,
-        UserMFASetting.is_enabled == True,
-    ).first()
+    mfa = (
+        db.query(UserMFASetting)
+        .filter(
+            UserMFASetting.user_id == user.id,
+            UserMFASetting.is_enabled == True,
+        )
+        .first()
+    )
     if mfa:
         session_token = encode_mfa_session_token(user.id)
         return Token(
@@ -446,17 +492,21 @@ def login(
         )
 
     csrf_token = generate_csrf_token()
-    access_token = create_access_token(data={
-        "sub": user.email,
-        "user_id": user.id,
-        "role": user.role,
-        "token_version": user.token_version,
-    })
-    refresh_token = create_refresh_token(data={
-        "sub": user.email,
-        "user_id": user.id,
-        "token_version": user.token_version,
-    })
+    access_token = create_access_token(
+        data={
+            "sub": user.email,
+            "user_id": user.id,
+            "role": user.role,
+            "token_version": user.token_version,
+        }
+    )
+    refresh_token = create_refresh_token(
+        data={
+            "sub": user.email,
+            "user_id": user.id,
+            "token_version": user.token_version,
+        }
+    )
 
     clear_failed_attempts(email)
     set_auth_cookies(response, access_token, refresh_token, csrf_token=csrf_token)
@@ -495,6 +545,7 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
 
     try:
         from app.security import decode_token
+
         payload = decode_token(refresh_token, expected_type="refresh")
         email = payload.get("sub")
         if not email:
@@ -518,9 +569,15 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
         )
 
     csrf_token = generate_csrf_token()
-    new_access_token = create_access_token(data={"sub": user.email, "user_id": user.id, "role": user.role})
-    new_refresh_token = create_refresh_token(data={"sub": user.email, "user_id": user.id})
-    set_auth_cookies(response, new_access_token, new_refresh_token, csrf_token=csrf_token)
+    new_access_token = create_access_token(
+        data={"sub": user.email, "user_id": user.id, "role": user.role}
+    )
+    new_refresh_token = create_refresh_token(
+        data={"sub": user.email, "user_id": user.id}
+    )
+    set_auth_cookies(
+        response, new_access_token, new_refresh_token, csrf_token=csrf_token
+    )
 
     return Token(
         access_token=new_access_token,
@@ -531,6 +588,7 @@ def refresh_token(request: Request, response: Response, db: Session = Depends(ge
 
 
 # SAML/SSO Routes (optional - only available if python3-saml is installed)
+
 
 def _saml_service(db: Session):
     """Get SAML service instance, raising clear error if not available."""
@@ -545,9 +603,11 @@ def saml_metadata():
         # Create a minimal service instance just for metadata
         class _MockDB:
             pass
+
         svc = _get_saml_service()(_MockDB())
         metadata = svc.get_metadata()
         from fastapi.responses import Response
+
         return Response(content=metadata, media_type="application/xml")
     except ImportError as e:
         raise HTTPException(status_code=501, detail=str(e))
@@ -563,7 +623,8 @@ def saml_login(request: Request, return_to: Optional[str] = None):
         request_data = {
             "https": "on" if request.url.scheme == "https" else "off",
             "http_host": request.url.hostname,
-            "server_port": request.url.port or (443 if request.url.scheme == "https" else 80),
+            "server_port": request.url.port
+            or (443 if request.url.scheme == "https" else 80),
             "script_name": request.url.path,
             "get_data": dict(request.query_params),
             "post_data": {},
@@ -586,18 +647,25 @@ async def saml_acs(request: Request, response: Response, db: Session = Depends(g
         request_data = {
             "https": "on" if request.url.scheme == "https" else "off",
             "http_host": request.url.hostname,
-            "server_port": request.url.port or (443 if request.url.scheme == "https" else 80),
+            "server_port": request.url.port
+            or (443 if request.url.scheme == "https" else 80),
             "script_name": request.url.path,
             "get_data": dict(request.query_params),
             "post_data": form_data,
         }
         saml_result = svc.process_sso(request_data)
-        
+
         # Find or create user
-        email = saml_result.get("attributes", {}).get("email", [None])[0] if isinstance(saml_result.get("attributes", {}).get("email"), list) else saml_result.get("attributes", {}).get("email")
+        email = (
+            saml_result.get("attributes", {}).get("email", [None])[0]
+            if isinstance(saml_result.get("attributes", {}).get("email"), list)
+            else saml_result.get("attributes", {}).get("email")
+        )
         if not email:
-            raise HTTPException(status_code=400, detail="SAML response missing email attribute")
-        
+            raise HTTPException(
+                status_code=400, detail="SAML response missing email attribute"
+            )
+
         user = db.query(User).filter(User.email == email).first()
         if not user:
             user = User(
@@ -608,15 +676,19 @@ async def saml_acs(request: Request, response: Response, db: Session = Depends(g
             db.add(user)
             db.commit()
             db.refresh(user)
-        
+
         if not user.is_active:
             raise HTTPException(status_code=401, detail="Account disabled")
-        
+
         csrf_token = generate_csrf_token()
-        access_token = create_access_token(data={"sub": user.email, "user_id": user.id, "role": user.role})
-        refresh_token = create_refresh_token(data={"sub": user.email, "user_id": user.id})
+        access_token = create_access_token(
+            data={"sub": user.email, "user_id": user.id, "role": user.role}
+        )
+        refresh_token = create_refresh_token(
+            data={"sub": user.email, "user_id": user.id}
+        )
         set_auth_cookies(response, access_token, refresh_token, csrf_token=csrf_token)
-        
+
         return RedirectResponse(url="/", status_code=302)
     except ImportError as e:
         raise HTTPException(status_code=501, detail=str(e))
@@ -632,12 +704,15 @@ def saml_slo(request: Request):
         name_id = request.query_params.get("name_id")
         session_index = request.query_params.get("session_index")
         if not name_id or not session_index:
-            raise HTTPException(status_code=400, detail="Missing name_id or session_index")
-        
+            raise HTTPException(
+                status_code=400, detail="Missing name_id or session_index"
+            )
+
         request_data = {
             "https": "on" if request.url.scheme == "https" else "off",
             "http_host": request.url.hostname,
-            "server_port": request.url.port or (443 if request.url.scheme == "https" else 80),
+            "server_port": request.url.port
+            or (443 if request.url.scheme == "https" else 80),
             "script_name": request.url.path,
             "get_data": dict(request.query_params),
             "post_data": {},
@@ -659,7 +734,8 @@ async def saml_sls(request: Request, response: Response):
         request_data = {
             "https": "on" if request.url.scheme == "https" else "off",
             "http_host": request.url.hostname,
-            "server_port": request.url.port or (443 if request.url.scheme == "https" else 80),
+            "server_port": request.url.port
+            or (443 if request.url.scheme == "https" else 80),
             "script_name": request.url.path,
             "get_data": dict(request.query_params),
             "post_data": dict(form_data),

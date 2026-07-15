@@ -1,19 +1,19 @@
-import re
 import hashlib
 import logging
-from datetime import datetime, timezone
+import re
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from sqlalchemy.orm import Session
 
-from app.config import settings
-from app.models import User, Policy, AITool, GuardrailLog, GuardrailRule
+from app.models import GuardrailLog, Policy, User
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PIIDetection:
@@ -22,19 +22,22 @@ class PIIDetection:
     count: int
     risk: str  # low, medium, high, critical
 
+
 @dataclass
 class PromptInjectionResult:
-    score: float          # 0-100
+    score: float  # 0-100
     detected: bool
     techniques: List[str] = field(default_factory=list)
     details: str = ""
 
+
 @dataclass
 class PIIDetectionResult:
-    score: float          # 0-100
+    score: float  # 0-100
     detected: bool
     items: List[PIIDetection] = field(default_factory=list)
     redacted_text: str = ""
+
 
 @dataclass
 class OutputSafetyResult:
@@ -43,39 +46,56 @@ class OutputSafetyResult:
     issues: List[str] = field(default_factory=list)
     details: str = ""
 
+
 @dataclass
 class PolicyResult:
     passed: bool
     violations: List[str] = field(default_factory=list)
     action: str = "allow"  # allow, warn, block
 
+
 @dataclass
 class GuardrailResult:
-    risk_score: float       # 0-100
-    action: str             # allow, warn, block
-    prompt_injection: PromptInjectionResult = field(default_factory=PromptInjectionResult)
+    risk_score: float  # 0-100
+    action: str  # allow, warn, block
+    prompt_injection: PromptInjectionResult = field(
+        default_factory=PromptInjectionResult
+    )
     pii: PIIDetectionResult = field(default_factory=PIIDetectionResult)
     output_safety: Optional[OutputSafetyResult] = None
     policy: PolicyResult = field(default_factory=PolicyResult)
     latency_ms: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # PII patterns
 # ---------------------------------------------------------------------------
 
 PII_PATTERNS: List[tuple] = [
-    ("email", re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'), "medium"),
-    ("ssn", re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), "critical"),
-    ("credit_card", re.compile(r'\b(?:\d[ -]*?){13,16}\b'), "critical"),
-    ("phone_us", re.compile(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'), "medium"),
-    ("ip_address", re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'), "low"),
-    ("aws_key", re.compile(r'(?i)AKIA[0-9A-Z]{16}'), "critical"),
-    ("slack_token", re.compile(r'xox[baprs]-[0-9a-zA-Z-]{10,}'), "critical"),
-    ("github_token", re.compile(r'(?i)gh[pousr]_[A-Za-z0-9_]{36,}'), "critical"),
-    ("jwt", re.compile(r'eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+'), "high"),
-    ("private_key", re.compile(r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'), "critical"),
-    ("basic_auth", re.compile(r'Authorization:\s*Basic\s+[A-Za-z0-9+/=]+'), "critical"),
-    ("bearer_token", re.compile(r'Authorization:\s*Bearer\s+[A-Za-z0-9-._~+/]+'), "critical"),
+    (
+        "email",
+        re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+        "medium",
+    ),
+    ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "critical"),
+    ("credit_card", re.compile(r"\b(?:\d[ -]*?){13,16}\b"), "critical"),
+    ("phone_us", re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b"), "medium"),
+    ("ip_address", re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "low"),
+    ("aws_key", re.compile(r"(?i)AKIA[0-9A-Z]{16}"), "critical"),
+    ("slack_token", re.compile(r"xox[baprs]-[0-9a-zA-Z-]{10,}"), "critical"),
+    ("github_token", re.compile(r"(?i)gh[pousr]_[A-Za-z0-9_]{36,}"), "critical"),
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+"), "high"),
+    (
+        "private_key",
+        re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
+        "critical",
+    ),
+    ("basic_auth", re.compile(r"Authorization:\s*Basic\s+[A-Za-z0-9+/=]+"), "critical"),
+    (
+        "bearer_token",
+        re.compile(r"Authorization:\s*Bearer\s+[A-Za-z0-9-._~+/]+"),
+        "critical",
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -83,16 +103,79 @@ PII_PATTERNS: List[tuple] = [
 # ---------------------------------------------------------------------------
 
 INJECTION_PATTERNS: List[tuple] = [
-    ("dan_mode_switch", re.compile(r'(?i)(from now on|you are (?:now |going to )?|act as |pretend (?:to be|you are))'), 30.0),
-    ("ignore_instructions", re.compile(r'(?i)(ignore (?:the )?(?:above|previous|all)|disregard|forget (?:your|all)|do not follow|skip the)'), 40.0),
-    ("role_play_bypass", re.compile(r'(?i)(dan |jailbreak|developer mode|debug mode|sudo mode|越南|freedom mode|unfiltered)'), 50.0),
-    ("token_smuggling", re.compile(r'(?i)(base64|hex|octal|binary)\s*(?:encode|decode|representation|of)'), 35.0),
-    ("delimiter_manip", re.compile(r'(?i)(ignore\s+(?:the\s+)?(?:above|system|prompt)|===+\s*[A-Z]|---+\s*[A-Z])'), 45.0),
-    ("threat_coercion", re.compile(r'(?i)(I will (?:harm|hurt|kill|destroy)|you (?:must|have to|will) (?:obey|answer|respond)|or (?:else|I will))'), 60.0),
-    ("output_formatting", re.compile(r'(?i)(do not (?:say|state|mention|include|refuse)|don\'t (?:say|refuse)|never (?:refuse|say))'), 35.0),
-    ("character_play", re.compile(r'(?i)(roleplay|role-play|rpg|character\s+ai|persona|chatbot\s+rules?)'), 25.0),
-    ("encoding_bypass", re.compile(r'(?i)(rot13|rot-13|caesar|cipher|morse|leetspeak|l33t)'), 30.0),
-    ("system_prompt_leak", re.compile(r'(?i)(print\s+(?:your|the)\s+(?:system|initial|prompt|instructions)|show\s+(?:me\s+)?(?:your|the)\s+(?:system|prompt|instructions))'), 50.0),
+    (
+        "dan_mode_switch",
+        re.compile(
+            r"(?i)(from now on|you are (?:now |going to )?|act as |pretend (?:to be|you are))"
+        ),
+        30.0,
+    ),
+    (
+        "ignore_instructions",
+        re.compile(
+            r"(?i)(ignore (?:the )?(?:above|previous|all)|"
+            r"disregard|forget (?:your|all)|do not follow|skip the)"
+        ),
+        40.0,
+    ),
+    (
+        "role_play_bypass",
+        re.compile(
+            r"(?i)(dan |jailbreak|developer mode|debug mode|sudo mode|越南|freedom mode|unfiltered)"
+        ),
+        50.0,
+    ),
+    (
+        "token_smuggling",
+        re.compile(
+            r"(?i)(base64|hex|octal|binary)\s*(?:encode|decode|representation|of)"
+        ),
+        35.0,
+    ),
+    (
+        "delimiter_manip",
+        re.compile(
+            r"(?i)(ignore\s+(?:the\s+)?(?:above|system|prompt)|===+\s*[A-Z]|---+\s*[A-Z])"
+        ),
+        45.0,
+    ),
+    (
+        "threat_coercion",
+        re.compile(
+            r"(?i)(I will (?:harm|hurt|kill|destroy)|"
+            r"you (?:must|have to|will) (?:obey|answer|respond)|"
+            r"or (?:else|I will))"
+        ),
+        60.0,
+    ),
+    (
+        "output_formatting",
+        re.compile(
+            r"(?i)(do not (?:say|state|mention|include|refuse)|"
+            r"don\'t (?:say|refuse)|never (?:refuse|say))"
+        ),
+        35.0,
+    ),
+    (
+        "character_play",
+        re.compile(
+            r"(?i)(roleplay|role-play|rpg|character\s+ai|persona|chatbot\s+rules?)"
+        ),
+        25.0,
+    ),
+    (
+        "encoding_bypass",
+        re.compile(r"(?i)(rot13|rot-13|caesar|cipher|morse|leetspeak|l33t)"),
+        30.0,
+    ),
+    (
+        "system_prompt_leak",
+        re.compile(
+            r"(?i)(print\s+(?:your|the)\s+(?:system|initial|prompt|instructions)|"
+            r"show\s+(?:me\s+)?(?:your|the)\s+(?:system|prompt|instructions))"
+        ),
+        50.0,
+    ),
 ]
 
 # ---------------------------------------------------------------------------
@@ -100,10 +183,32 @@ INJECTION_PATTERNS: List[tuple] = [
 # ---------------------------------------------------------------------------
 
 OUTPUT_SAFETY_PATTERNS: List[tuple] = [
-    ("toxic_language", re.compile(r'(?i)(\b(idiot|stupid|moron|worthless|kill yourself)\b)'), 40.0),
-    ("hate_speech", re.compile(r'(?i)(\b(racial|hate|discriminat|bigot)\s+(?:slur|remark|comment|statement)\b)'), 50.0),
-    ("dangerous_content", re.compile(r'(?i)(how to (?:make|build|create|synthesize)\s+(?:bomb|explosive|weapon|drug|poison))'), 80.0),
-    ("leaked_credential", re.compile(r'(?i)(password|secret|api[_-]?key|token)\s*(?:is|:|=)\s*[\'"]?[A-Za-z0-9_\-.]{10,}'), 70.0),
+    (
+        "toxic_language",
+        re.compile(r"(?i)(\b(idiot|stupid|moron|worthless|kill yourself)\b)"),
+        40.0,
+    ),
+    (
+        "hate_speech",
+        re.compile(
+            r"(?i)(\b(racial|hate|discriminat|bigot)\s+(?:slur|remark|comment|statement)\b)"
+        ),
+        50.0,
+    ),
+    (
+        "dangerous_content",
+        re.compile(
+            r"(?i)(how to (?:make|build|create|synthesize)\s+(?:bomb|explosive|weapon|drug|poison))"
+        ),
+        80.0,
+    ),
+    (
+        "leaked_credential",
+        re.compile(
+            r'(?i)(password|secret|api[_-]?key|token)\s*(?:is|:|=)\s*[\'"]?[A-Za-z0-9_\-.]{10,}'
+        ),
+        70.0,
+    ),
 ]
 
 
@@ -122,6 +227,7 @@ class GuardrailEngine:
         tool_id: Optional[int] = None,
     ) -> GuardrailResult:
         import time
+
         start = time.time()
 
         injection = self.analyze_prompt_injection(prompt)
@@ -178,6 +284,7 @@ class GuardrailEngine:
         user: User,
     ) -> GuardrailResult:
         import time
+
         start = time.time()
 
         injection = self.analyze_prompt_injection(prompt)
@@ -185,18 +292,18 @@ class GuardrailEngine:
         pii = self.detect_pii(output)
 
         scores = []
-        issues = []
 
         if injection.detected:
             scores.append(injection.score * 0.5)
         if output_safety.issues:
             scores.append(output_safety.score)
-            issues = output_safety.issues
         if pii.detected:
             scores.append(pii.score)
 
         risk_score = min(sum(scores) / len(scores), 100) if scores else 0.0
-        action = "block" if risk_score >= 70 else ("warn" if risk_score >= 35 else "allow")
+        action = (
+            "block" if risk_score >= 70 else ("warn" if risk_score >= 35 else "allow")
+        )
 
         latency = (time.time() - start) * 1000
 
@@ -270,12 +377,14 @@ class GuardrailEngine:
 
                 for val in unique:
                     preview = val[:20] + "..." if len(val) > 20 else val
-                    items.append(PIIDetection(
-                        type=name,
-                        value_preview=preview,
-                        count=len(matches),
-                        risk=risk,
-                    ))
+                    items.append(
+                        PIIDetection(
+                            type=name,
+                            value_preview=preview,
+                            count=len(matches),
+                            risk=risk,
+                        )
+                    )
                     redacted = redacted.replace(val, f"[REDACTED:{name}]")
 
         return PIIDetectionResult(
@@ -355,7 +464,9 @@ class GuardrailEngine:
                     elif policy.enforcement_mode == "warn" and action != "block":
                         action = "warn"
 
-        return PolicyResult(passed=len(violations) == 0, violations=violations, action=action)
+        return PolicyResult(
+            passed=len(violations) == 0, violations=violations, action=action
+        )
 
     # ------------------------------------------------------------------
     # Logging
@@ -444,7 +555,9 @@ class GuardrailEngine:
             "pass_rate": round((allowed / total * 100) if total else 100, 1),
             "avg_risk_score": round(float(avg_risk), 1),
             "most_common_pii": list(set(pii_flat))[:10] if pii_flat else [],
-            "most_common_violations": list(set(violation_flat))[:10] if violation_flat else [],
+            "most_common_violations": (
+                list(set(violation_flat))[:10] if violation_flat else []
+            ),
         }
 
     def get_logs(
@@ -463,7 +576,12 @@ class GuardrailEngine:
         if user_id:
             query = query.filter(GuardrailLog.user_id == user_id)
 
-        logs = query.order_by(GuardrailLog.created_at.desc()).offset(offset).limit(limit).all()
+        logs = (
+            query.order_by(GuardrailLog.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
 
         return [
             {

@@ -10,19 +10,17 @@ Provides enterprise-grade security middleware for:
 - Audit logging
 """
 
-from fastapi import Request, Response, HTTPException
+import ipaddress
+import time
+from typing import List, Optional
+
+from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-import time
-import redis
-import ipaddress
-from typing import List, Optional
-import logging
-import threading
 
 from app.config import settings
-from app.logging_config import logger, log_security_event
+from app.logging_config import log_security_event, logger
 
 # Prometheus metrics
 try:
@@ -37,7 +35,22 @@ try:
         "http_request_duration_seconds",
         "HTTP request duration in seconds",
         ["method", "endpoint"],
-        buckets=(0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0),
+        buckets=(
+            0.005,
+            0.01,
+            0.025,
+            0.05,
+            0.075,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
+        ),
     )
     active_requests = Counter(
         "http_requests_active",
@@ -103,7 +116,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
         # Log request
         logger.info(
-            f"Request started",
+            "Request started",
             extra={
                 "extra_data": {
                     "method": request.method,
@@ -135,13 +148,13 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             request_count.labels(
                 method=request.method, endpoint=endpoint, status=response.status_code
             ).inc()
-            request_duration.labels(
-                method=request.method, endpoint=endpoint
-            ).observe(process_time)
+            request_duration.labels(method=request.method, endpoint=endpoint).observe(
+                process_time
+            )
 
         # Log response
         logger.info(
-            f"Request completed",
+            "Request completed",
             extra={
                 "extra_data": {
                     "method": request.method,
@@ -282,11 +295,6 @@ def setup_security_middleware(app):
 
     # Setup tiered rate limiting (per-key + global fallback)
     try:
-        from slowapi import Limiter
-        from slowapi.util import get_remote_address
-        from slowapi.errors import RateLimitExceeded
-        from fastapi.responses import JSONResponse
-
         _setup_tiered_rate_limiting(app)
     except ImportError:
         if settings.is_production:
@@ -294,15 +302,17 @@ def setup_security_middleware(app):
                 "slowapi is required in production for rate limiting. "
                 "Install it: pip install slowapi"
             )
-        logger.warning("slowapi not installed — rate limiting disabled (pip install slowapi)")
+        logger.warning(
+            "slowapi not installed — rate limiting disabled (pip install slowapi)"
+        )
 
 
 def _setup_tiered_rate_limiting(app):
     """Set up tiered rate limiting with per-API-key support via Redis."""
-    from slowapi import Limiter
-    from slowapi.util import get_remote_address
-    from slowapi.errors import RateLimitExceeded
     from fastapi.responses import JSONResponse
+    from slowapi import Limiter
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.util import get_remote_address
 
     if settings.REDIS_URL:
         limiter = Limiter(
@@ -335,13 +345,16 @@ def _setup_tiered_rate_limiting(app):
         if api_key_header and settings.REDIS_URL:
             try:
                 import hashlib
+
                 import redis as redis_client
+
                 r = redis_client.from_url(settings.REDIS_URL)
 
                 key_hash = hashlib.sha256(api_key_header.encode()).hexdigest()
                 limit_key = f"apikey_sliding:{key_hash}"
 
                 import time as time_module
+
                 now = time_module.time()
                 window_start = now - 60
                 r.zremrangebyscore(limit_key, 0, window_start)
@@ -352,7 +365,10 @@ def _setup_tiered_rate_limiting(app):
                 if current >= 1000:  # default max RPM
                     return JSONResponse(
                         status_code=429,
-                        content={"detail": "API key rate limit exceeded", "retry_after": 60},
+                        content={
+                            "detail": "API key rate limit exceeded",
+                            "retry_after": 60,
+                        },
                     )
             except Exception:
                 pass
@@ -411,7 +427,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
                     r = redis_client.from_url(settings.REDIS_URL)
                     r.lpush("audit:requests", str(audit_data))
                     r.ltrim("audit:requests", 0, 9999)
-                except:
+                except Exception:
                     pass
 
         return response

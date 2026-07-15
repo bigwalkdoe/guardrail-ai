@@ -3,17 +3,13 @@ Google Chronicle Integration Service.
 Provides integration with Google Chronicle for security analytics and log management.
 """
 
-import logging
-import threading
-import queue
 import hashlib
-import hmac
-import base64
-import json
-import time
-from datetime import datetime
-from typing import Dict, Any, Optional, List
+import logging
+import queue
+import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -26,7 +22,9 @@ logger = logging.getLogger(__name__)
 class ChronicleEvent:
     """Chronicle event data."""
 
-    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
+    timestamp: datetime = field(
+        default_factory=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    )
     event_type: str = "security_event"
     source: str = "guardrail-ai"
     source_ip: Optional[str] = None
@@ -50,29 +48,10 @@ class ChronicleEvent:
                 "product_name": "Guardrail AI",
                 "product_version": "1.0.0",
                 "collector": self.source,
-            },
-            "network": {
-                "application_protocol": "tcp",
-            },
-            "security": {
-                "severity": self.severity.upper(),
-            },
-            "principal": {
-                "user": {"userid": self.user} if self.user else {},
-            },
-            "target": {
-                "ip": self.destination_ip,
-            },
-            "src": {
-                "ip": self.source_ip,
-            },
-            "intermediary": {
-                "ip": self.source_ip,
-            },
-            "metadata": {
                 "description": self.message,
                 "product_log_id": hashlib.md5(
-                    f"{self.timestamp}{self.event_type}".encode()
+                    f"{self.timestamp}{self.event_type}".encode(),
+                    usedforsecurity=False,
                 ).hexdigest(),
             },
         }

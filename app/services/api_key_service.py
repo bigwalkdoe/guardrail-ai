@@ -3,19 +3,17 @@ API Key Management Service.
 Provides API key generation and management for programmatic access.
 """
 
-import secrets
 import hashlib
-import redis
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+import secrets
+from datetime import datetime, timedelta, timezone
 from enum import Enum
-from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
+import redis
 from sqlalchemy.orm import Session
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey
 
-from app.models import APIKey
 from app.config import settings
+from app.models import APIKey
 
 
 class APIKeyType(str, Enum):
@@ -44,7 +42,7 @@ class APIKeyService:
         if settings.REDIS_URL:
             try:
                 self._redis = redis.from_url(settings.REDIS_URL)
-            except:
+            except redis.exceptions.RedisError:
                 pass
 
     def _hash_key(self, key: str) -> str:
@@ -73,7 +71,9 @@ class APIKeyService:
 
         expires_at = None
         if expires_days:
-            expires_at = datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(days=expires_days)
+            expires_at = datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(
+                days=expires_days
+            )
 
         api_key = APIKey(
             user_id=user_id,
@@ -97,9 +97,9 @@ class APIKeyService:
             "key": key,
             "prefix": prefix,
             "key_type": api_key.key_type,
-            "expires_at": api_key.expires_at.isoformat()
-            if api_key.expires_at
-            else None,
+            "expires_at": (
+                api_key.expires_at.isoformat() if api_key.expires_at else None
+            ),
             "rate_limit": api_key.rate_limit,
             "created_at": api_key.created_at.isoformat(),
         }
@@ -122,7 +122,9 @@ class APIKeyService:
         if not api_key:
             return None
 
-        if api_key.expires_at and api_key.expires_at < datetime.now(tz=timezone.utc).replace(tzinfo=None):
+        if api_key.expires_at and api_key.expires_at < datetime.now(
+            tz=timezone.utc
+        ).replace(tzinfo=None):
             api_key.status = APIKeyStatus.EXPIRED.value
             self.db.commit()
             return None
@@ -142,11 +144,16 @@ class APIKeyService:
         if not self._redis:
             return True
 
-        return self._check_sliding_window(f"apikey_rate:{api_key.id}", api_key.rate_limit, 60)
+        return self._check_sliding_window(
+            f"apikey_rate:{api_key.id}", api_key.rate_limit, 60
+        )
 
-    def _check_sliding_window(self, key: str, max_requests: int, window_seconds: int = 60) -> bool:
+    def _check_sliding_window(
+        self, key: str, max_requests: int, window_seconds: int = 60
+    ) -> bool:
         """Sliding window rate limit check using Redis sorted sets."""
         import time as time_module
+
         now = time_module.time()
         window_start = now - window_seconds
 
@@ -171,6 +178,7 @@ class APIKeyService:
 
         if self._redis:
             import time as time_module
+
             now = time_module.time()
             window_start = now - 60
             key = f"apikey_rate:{api_key.id}"
@@ -257,7 +265,9 @@ class APIKeyService:
             "key": new_key,
             "prefix": new_prefix,
             "key_type": api_key.key_type,
-            "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
+            "expires_at": (
+                api_key.expires_at.isoformat() if api_key.expires_at else None
+            ),
             "rate_limit": api_key.rate_limit,
             "created_at": api_key.created_at.isoformat(),
         }

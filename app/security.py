@@ -1,26 +1,26 @@
-import bcrypt
+import base64
 import hashlib
 import hmac
-import secrets
-import re
-from datetime import datetime, timezone, timedelta, timezone
-from typing import Optional, Dict, Any
 import logging
+import re
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address, ip_network
 
+import bcrypt
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import base64
-import uuid
 
 from app.config import settings
 from app.database import get_db
-from app.models import User as UserModel, UserRole
+from app.models import User as UserModel
+from app.models import UserRole
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=False)
 
@@ -34,37 +34,41 @@ PASSWORD_HISTORY_SIZE = 5
 
 # Security Patterns
 PASSWORD_PATTERN = re.compile(
-    r'^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,128}$'
+    r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{12,128}$"
 )
-EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
 
 # Initialize encryption
 def get_encryption_key() -> bytes:
     """Get encryption key from environment.
     In production, ENCRYPTION_KEY must be set explicitly.
     In development, a warning is emitted and a derived key is used."""
-    key = getattr(settings, 'ENCRYPTION_KEY', None)
+    key = getattr(settings, "ENCRYPTION_KEY", None)
     if not key:
         if settings.is_production:
             raise RuntimeError(
                 "ENCRYPTION_KEY is not set. "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                "Generate one with: python -c "
+                "'from cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())'"
             )
         logger.warning(
             "ENCRYPTION_KEY not set — using derived key (INSECURE: development only). "
             "Set ENCRYPTION_KEY in production."
         )
-        salt = b'guardrail_salt_2024'
+        salt = b"guardrail_salt_2024"
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
             iterations=100000,
         )
-        key = base64.urlsafe_b64encode(kdf.derive(b'guardrail_encryption_key'))
+        key = base64.urlsafe_b64encode(kdf.derive(b"guardrail_encryption_key"))
     if isinstance(key, str):
         key = key.encode()
     return key
+
 
 encryption_fernet = Fernet(get_encryption_key())
 
@@ -77,18 +81,32 @@ def validate_password_strength(password: str) -> tuple[bool, str]:
         return False, f"Password must be at least {MIN_PASSWORD_LENGTH} characters long"
 
     if len(password) > MAX_PASSWORD_LENGTH:
-        return False, f"Password must be no more than {MAX_PASSWORD_LENGTH} characters long"
+        return (
+            False,
+            f"Password must be no more than {MAX_PASSWORD_LENGTH} characters long",
+        )
 
     if not PASSWORD_PATTERN.match(password):
-        return False, "Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character"
+        return (
+            False,
+            "Password must contain at least one uppercase letter, "
+            "one lowercase letter, one number, and one special character",
+        )
 
     normalized = password.lower()
-    weak_passwords = ['password', '123456', 'qwerty', 'admin', 'password123', 'guardrail']
+    weak_passwords = [
+        "password",
+        "123456",
+        "qwerty",
+        "admin",
+        "password123",
+        "guardrail",
+    ]
     if normalized in weak_passwords:
         return False, "Password is too common, please choose a stronger password"
 
     for i in range(len(password) - 2):
-        chunk = password[i:i+3]
+        chunk = password[i : i + 3]
         if chunk.isdigit():
             a, b, c = int(chunk[0]), int(chunk[1]), int(chunk[2])
             if (b == a + 1 and c == b + 1) or (b == a - 1 and c == b - 1):
@@ -114,8 +132,10 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     try:
         # Use constant-time comparison
         return hmac.compare_digest(
-            bcrypt.hashpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8")),
-            hashed_password.encode("utf-8")
+            bcrypt.hashpw(
+                plain_password.encode("utf-8"), hashed_password.encode("utf-8")
+            ),
+            hashed_password.encode("utf-8"),
         )
     except Exception:
         return False
@@ -161,7 +181,7 @@ def sanitize_input(input_str: str, max_length: int = 1000) -> str:
         return ""
 
     # Remove null bytes and other dangerous characters
-    sanitized = input_str.replace('\x00', '').replace('\r\n', '\n').replace('\r', '\n')
+    sanitized = input_str.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
 
     # Limit length
     if len(sanitized) > max_length:
@@ -268,8 +288,6 @@ def hash_reset_token(token: str) -> str:
 # MFA session tokens (short-lived, for the 2nd factor challenge)
 # ---------------------------------------------------------------------------
 
-import uuid
-
 MFA_SESSION_EXPIRE_MINUTES = 5
 
 
@@ -367,7 +385,9 @@ def decode_token(token: str, expected_type: str | None = None) -> dict:
     """Decode and validate a JWT token, optionally checking its type."""
     try:
         payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM],
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
             audience=settings.APP_NAME,
         )
     except JWTError as e:

@@ -3,22 +3,20 @@ Webhook Service.
 Provides webhook management for external integrations.
 """
 
-import logging
 import json
-import requests
-import secrets
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List, Callable
-from enum import Enum
-from dataclasses import dataclass, field
-import threading
+import logging
 import queue
+import secrets
+import threading
+import time
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
+import requests
 from sqlalchemy.orm import Session
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, ForeignKey
 
 from app.models import Webhook
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +88,8 @@ class WebhookService:
 
     def _sign_payload(self, payload: str, secret: str) -> str:
         """Sign webhook payload with HMAC."""
-        import hmac
         import hashlib
+        import hmac
 
         if not secret:
             return ""
@@ -127,9 +125,6 @@ class WebhookService:
         self, payload: WebhookPayload, webhook: Webhook, delivery_url: str
     ):
         """Deliver webhook to endpoint."""
-        import hmac
-        import hashlib
-
         payload_str = json.dumps(payload.to_dict())
 
         headers = {
@@ -143,7 +138,6 @@ class WebhookService:
             headers["X-Webhook-Signature"] = signature
 
         success = False
-        last_error = None
 
         for attempt in range(webhook.retry_count + 1):
             try:
@@ -160,11 +154,8 @@ class WebhookService:
                     success = True
                     webhook.failure_count = 0
                     break
-                else:
-                    last_error = f"HTTP {response.status_code}"
-
-            except requests.RequestException as e:
-                last_error = str(e)
+            except requests.RequestException:
+                pass
 
             if attempt < webhook.retry_count:
                 time.sleep(webhook.retry_delay * (attempt + 1))
@@ -267,9 +258,9 @@ class WebhookService:
                 "url": w.url,
                 "events": w.events,
                 "status": w.status,
-                "last_triggered_at": w.last_triggered_at.isoformat()
-                if w.last_triggered_at
-                else None,
+                "last_triggered_at": (
+                    w.last_triggered_at.isoformat() if w.last_triggered_at else None
+                ),
                 "last_status_code": w.last_status_code,
                 "failure_count": w.failure_count,
                 "created_at": w.created_at.isoformat(),
@@ -311,14 +302,13 @@ class WebhookService:
         self._deliver_webhook(payload, webhook, webhook.url)
 
         return {
-            "status": "success"
-            if webhook.last_status_code and webhook.last_status_code < 400
-            else "failed",
+            "status": (
+                "success"
+                if webhook.last_status_code and webhook.last_status_code < 400
+                else "failed"
+            ),
             "status_code": webhook.last_status_code,
         }
-
-
-import time
 
 
 # =============================================================================
@@ -339,8 +329,8 @@ def verify_incoming_webhook(
       - github :  X-Hub-Signature-256
       - generic:  X-Webhook-Signature (HMAC-SHA256 of body)
     """
-    import hmac
     import hashlib
+    import hmac
 
     if not secret:
         return False
@@ -351,14 +341,18 @@ def verify_incoming_webhook(
         if not timestamp or not sig:
             return False
         base = f"v0:{timestamp}:{body.decode()}"
-        expected = "v0=" + hmac.new(secret.encode(), base.encode(), hashlib.sha256).hexdigest()
+        expected = (
+            "v0=" + hmac.new(secret.encode(), base.encode(), hashlib.sha256).hexdigest()
+        )
         return hmac.compare_digest(sig, expected)
 
     if provider == "github":
         sig = headers.get("X-Hub-Signature-256", "")
         if not sig:
             return False
-        expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        expected = (
+            "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        )
         return hmac.compare_digest(sig, expected)
 
     if provider == "generic":
@@ -392,4 +386,9 @@ def process_incoming_webhook(
     }
 
     mapped = event_map.get(provider, {}).get(event, f"webhook.{provider}.{event}")
-    return {"status": "received", "event": event, "mapped_event": mapped, "provider": provider}
+    return {
+        "status": "received",
+        "event": event,
+        "mapped_event": mapped,
+        "provider": provider,
+    }

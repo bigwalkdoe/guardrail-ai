@@ -4,8 +4,6 @@ Handles async background tasks for email, SIEM, scanning, and reporting.
 """
 
 import logging
-from datetime import timedelta
-from typing import Any, Optional
 
 from celery import Celery
 from celery.schedules import crontab

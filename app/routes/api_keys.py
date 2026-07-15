@@ -3,14 +3,15 @@ API Keys Management Routes.
 Endpoints for creating and managing API keys for programmatic access.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.security import get_current_user, require_admin
 from app.models import User
+from app.security import get_current_user, require_admin
 from app.services.api_key_service import APIKeyService, APIKeyType
 
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
@@ -59,7 +60,7 @@ def create_api_key(
 
     try:
         key_type = APIKeyType(key_data.key_type)
-    except:
+    except ValueError:
         key_type = APIKeyType.STANDARD
 
     result = service.create_key(

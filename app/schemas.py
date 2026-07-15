@@ -1,7 +1,8 @@
-from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional
 from enum import Enum
+from typing import Optional
+
+from pydantic import BaseModel, Field
 
 
 class UsageType(str, Enum):
@@ -740,7 +741,7 @@ class OutputSafetyResult(BaseModel):
     details: str = ""
 
 
-class PolicyResult(BaseModel):
+class PolicyEvaluationResult(BaseModel):
     passed: bool
     violations: list[str] = Field(default_factory=list)
     action: str = "allow"
@@ -752,7 +753,7 @@ class GuardrailEvaluateResponse(BaseModel):
     prompt_injection: PromptInjectionResult
     pii: PIIDetectionResult
     output_safety: Optional[OutputSafetyResult] = None
-    policy: PolicyResult
+    policy: PolicyEvaluationResult
     latency_ms: float = 0.0
 
 

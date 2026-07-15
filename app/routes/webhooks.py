@@ -3,19 +3,22 @@ Webhook Management Routes.
 Endpoints for creating, managing, and receiving webhooks.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
-from typing import Optional, List
-from pydantic import BaseModel
+from typing import List, Optional
 
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.config import settings
 from app.database import get_db
-from app.security import get_current_user
+from app.logging_config import logger
 from app.models import User
+from app.security import get_current_user
 from app.services.webhook_service import (
-    WebhookService,
     WebhookEvent,
-    verify_incoming_webhook,
+    WebhookService,
     process_incoming_webhook,
+    verify_incoming_webhook,
 )
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -51,7 +54,7 @@ def create_webhook(
     for event in webhook_data.events:
         try:
             WebhookEvent(event)
-        except:
+        except ValueError:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid event type: {event}",
@@ -121,12 +124,17 @@ async def receive_webhook(
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     import json
+
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
         payload = {"raw": body.decode(errors="replace")}
 
-    event = headers.get("X-GitHub-Event") or headers.get("X-Slack-Event") or payload.get("type", "unknown")
+    event = (
+        headers.get("X-GitHub-Event")
+        or headers.get("X-Slack-Event")
+        or payload.get("type", "unknown")
+    )
     result = process_incoming_webhook(provider, event, payload)
 
     # Slack URL verification challenge

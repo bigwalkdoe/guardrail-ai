@@ -4,11 +4,13 @@ Provides integration with PagerDuty for alerting and incident management.
 """
 
 import logging
-import threading
 import queue
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+import threading
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
 import requests
 
 from app.config import settings
@@ -25,7 +27,9 @@ class PagerDutyAlert:
     body: str = ""
     custom_details: Dict[str, Any] = field(default_factory=dict)
     source: str = "guardrail-ai"
-    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
+    timestamp: datetime = field(
+        default_factory=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    )
 
     def to_payload(self) -> Dict[str, Any]:
         return {
@@ -229,7 +233,10 @@ class PagerDutyService:
                 custom_details=details,
             )
             self.client.send(alert)
-            return hashlib.md5(f"{title}{datetime.now(tz=timezone.utc).replace(tzinfo=None)}".encode()).hexdigest()
+            return hashlib.md5(
+                f"{title}{datetime.now(tz=timezone.utc).replace(tzinfo=None)}".encode(),
+                usedforsecurity=False,
+            ).hexdigest()
         return ""
 
     def get_status(self) -> Dict[str, Any]:
