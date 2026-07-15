@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "guardrail-ai.fullname" . }}-frontend
+  labels:
+    {{- include "guardrail-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "guardrail-ai.name" . }}-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "guardrail-ai.name" . }}-frontend
+        {{- include "guardrail-ai.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}-frontend"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 80
+              name: http
+          env:
+            - name: VITE_BACKEND_URL
+              value: "http://{{ include "guardrail-ai.fullname" . }}-api:8000"
+            - name: NODE_ENV
+              value: production
+          resources:
+            {{- toYaml .Values.resources.frontend | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "guardrail-ai.fullname" . }}-frontend
+  labels:
+    {{- include "guardrail-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "guardrail-ai.name" . }}-frontend
+  ports:
+    - port: 80
+      targetPort: http
+      name: http

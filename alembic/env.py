@@ -12,7 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from app.database import Base
 from app.models import (
     Organization, User, AITool, Policy, Prompt, 
-    Report, PolicyViolation, Usage, AIUsageLog, AuditExport
+    Report, PolicyViolation, Usage, AIUsageLog, AuditExport,
+    Asset, Vulnerability, AttackPath, Alert, ThreatIntel,
+    ScanJob, APIKey, UsageRecord, BillingPlan, Webhook,
+    GuardrailLog, GuardrailRule, PasswordResetToken, UserMFASetting,
 )
 
 # this is the Alembic Config object

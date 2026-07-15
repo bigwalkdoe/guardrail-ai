@@ -319,3 +319,77 @@ class WebhookService:
 
 
 import time
+
+
+# =============================================================================
+# Incoming webhook verification
+# =============================================================================
+
+
+def verify_incoming_webhook(
+    provider: str,
+    body: bytes,
+    headers: dict,
+    secret: str,
+) -> bool:
+    """Verify an incoming webhook's HMAC signature.
+
+    Supports:
+      - slack  :  Slack signing secret (version=v0)
+      - github :  X-Hub-Signature-256
+      - generic:  X-Webhook-Signature (HMAC-SHA256 of body)
+    """
+    import hmac
+    import hashlib
+
+    if not secret:
+        return False
+
+    if provider == "slack":
+        timestamp = headers.get("X-Slack-Request-Timestamp", "")
+        sig = headers.get("X-Slack-Signature", "")
+        if not timestamp or not sig:
+            return False
+        base = f"v0:{timestamp}:{body.decode()}"
+        expected = "v0=" + hmac.new(secret.encode(), base.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected)
+
+    if provider == "github":
+        sig = headers.get("X-Hub-Signature-256", "")
+        if not sig:
+            return False
+        expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected)
+
+    if provider == "generic":
+        sig = headers.get("X-Webhook-Signature", "")
+        if not sig:
+            return False
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected)
+
+    return False
+
+
+def process_incoming_webhook(
+    provider: str,
+    event: str,
+    payload: dict,
+) -> dict:
+    """Process an incoming webhook and map to internal events."""
+    logger.info(f"Incoming webhook from {provider}: event={event}")
+
+    event_map = {
+        "slack": {
+            "url_verification": "system.webhook.verify",
+            "event_callback": "system.webhook.event",
+        },
+        "github": {
+            "push": "code.push",
+            "pull_request": "code.pull_request",
+            "issues": "code.issue",
+        },
+    }
+
+    mapped = event_map.get(provider, {}).get(event, f"webhook.{provider}.{event}")
+    return {"status": "received", "event": event, "mapped_event": mapped, "provider": provider}

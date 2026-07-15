@@ -1,0 +1,47 @@
+{{- if .Values.autoscaling.api.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "guardrail-ai.fullname" . }}-api
+  labels:
+    {{- include "guardrail-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "guardrail-ai.fullname" . }}-api
+  minReplicas: {{ .Values.autoscaling.api.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.api.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.api.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if .Values.autoscaling.celeryWorker.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "guardrail-ai.fullname" . }}-celery-worker
+  labels:
+    {{- include "guardrail-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: celery-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "guardrail-ai.fullname" . }}-celery-worker
+  minReplicas: {{ .Values.autoscaling.celeryWorker.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.celeryWorker.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.celeryWorker.targetCPUUtilizationPercentage }}
+{{- end }}

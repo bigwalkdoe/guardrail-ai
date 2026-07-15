@@ -88,6 +88,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-asyncio pytest-cov
+      - name: Run Alembic migrations
+        env:
+          APP_ENV: test
+          DATABASE_URL: postgresql://guardrail:guardrail@localhost:5432/guardrail_test
+          SECRET_KEY: test-secret-key-for-ci-32-chars-minimum!!
+          REDIS_URL: redis://localhost:6379/0
+        run: alembic upgrade head
       - name: Run tests
         env:
           APP_ENV: test

@@ -1,20 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
 
-const Users = () => {
+const Admin = () => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.getUsers()
-      .then(setUsers)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    const load = async () => {
+      try { setUsers(await api.getUsers()); } catch (e) { console.error(e); }
+      setLoading(false);
+    };
+    load();
   }, []);
 
   return (
     <div>
-      <h1 style={{ margin: '0 0 24px', fontSize: 24 }}>Users</h1>
+      <h1 style={{ margin: '0 0 24px', fontSize: 24 }}>Admin</h1>
 
       {loading ? <div>Loading...</div> : (
         <div style={{ background: '#fff', borderRadius: 10, boxShadow: '0 1px 3px rgba(0,0,0,0.08)', overflow: 'hidden' }}>
@@ -45,4 +46,4 @@ const Users = () => {
   );
 };
 
-export default Users;
+export default Admin;

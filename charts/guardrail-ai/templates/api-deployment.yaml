@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "guardrail-ai.fullname" . }}-api
+  labels:
+    {{- include "guardrail-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "guardrail-ai.name" . }}-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "guardrail-ai.name" . }}-api
+        {{- include "guardrail-ai.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: APP_ENV
+              value: {{ .Values.config.appEnv }}
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "guardrail-ai.fullname" . }}-secrets
+                  key: secret-key
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "guardrail-ai.fullname" . }}-secrets
+                  key: encryption-key
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "guardrail-ai.fullname" . }}-secrets
+                  key: database-url
+            - name: REDIS_URL
+              value: {{ .Values.config.redisUrl }}
+            - name: NEO4J_URI
+              value: {{ .Values.config.neo4jUri }}
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "guardrail-ai.fullname" . }}-secrets
+                  key: neo4j-password
+            - name: CELERY_BROKER_URL
+              value: {{ .Values.config.celeryBrokerUrl }}
+            - name: CELERY_RESULT_BACKEND
+              value: {{ .Values.config.celeryResultBackend }}
+            - name: SENTRY_DSN
+              value: {{ .Values.config.sentryDsn }}
+            - name: ALLOWED_ORIGINS
+              value: {{ .Values.config.allowedOrigins }}
+            - name: TRUSTED_HOSTS
+              value: {{ .Values.config.trustedHosts }}
+            - name: RATE_LIMIT_PER_MINUTE
+              value: "{{ .Values.config.rateLimitPerMinute }}"
+            - name: DB_POOL_SIZE
+              value: "{{ .Values.config.dbPoolSize }}"
+            - name: DB_MAX_OVERFLOW
+              value: "{{ .Values.config.dbMaxOverflow }}"
+          resources:
+            {{- toYaml .Values.resources.api | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "guardrail-ai.fullname" . }}-api
+  labels:
+    {{- include "guardrail-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "guardrail-ai.name" . }}-api
+  ports:
+    - port: 8000
+      targetPort: http
+      name: http

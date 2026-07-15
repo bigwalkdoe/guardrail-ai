@@ -694,3 +694,158 @@ class AIDecisionResponse(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
     risk_level: str
     confidence: float
+
+
+# =============================================================================
+# Guardrail Evaluation Schemas
+# =============================================================================
+
+
+class GuardrailEvaluateRequest(BaseModel):
+    prompt: str
+    tool_id: Optional[int] = None
+
+
+class GuardrailEvaluateOutputRequest(BaseModel):
+    prompt: str
+    output: str
+    tool_id: Optional[int] = None
+
+
+class PIIDetectionItem(BaseModel):
+    type: str
+    value_preview: str
+    count: int
+    risk: str
+
+
+class PromptInjectionResult(BaseModel):
+    score: float
+    detected: bool
+    techniques: list[str] = Field(default_factory=list)
+    details: str = ""
+
+
+class PIIDetectionResult(BaseModel):
+    score: float
+    detected: bool
+    items: list[PIIDetectionItem] = Field(default_factory=list)
+    redacted_text: str = ""
+
+
+class OutputSafetyResult(BaseModel):
+    score: float
+    passed: bool
+    issues: list[str] = Field(default_factory=list)
+    details: str = ""
+
+
+class PolicyResult(BaseModel):
+    passed: bool
+    violations: list[str] = Field(default_factory=list)
+    action: str = "allow"
+
+
+class GuardrailEvaluateResponse(BaseModel):
+    risk_score: float
+    action: str
+    prompt_injection: PromptInjectionResult
+    pii: PIIDetectionResult
+    output_safety: Optional[OutputSafetyResult] = None
+    policy: PolicyResult
+    latency_ms: float = 0.0
+
+
+class GuardrailLogEntry(BaseModel):
+    id: int
+    user_id: int
+    tool_id: Optional[int] = None
+    prompt_preview: str
+    evaluation_type: str
+    risk_score: float
+    action_taken: str
+    injection_score: float
+    pii_detected: bool
+    pii_types: list[str] = Field(default_factory=list)
+    policy_violations: list[str] = Field(default_factory=list)
+    latency_ms: float
+    created_at: str
+
+
+class GuardrailStats(BaseModel):
+    total_evaluations: int
+    blocked: int
+    warned: int
+    allowed: int
+    pass_rate: float
+    avg_risk_score: float
+    most_common_pii: list[str] = Field(default_factory=list)
+    most_common_violations: list[str] = Field(default_factory=list)
+
+
+class GuardrailRuleCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    category: str = "injection"
+    pattern: str
+    action: str = "warn"
+    severity: str = "medium"
+
+
+class GuardrailRuleUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    pattern: Optional[str] = None
+    action: Optional[str] = None
+    severity: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class GuardrailRuleResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    category: str
+    pattern: str
+    action: str
+    severity: str
+    is_active: bool
+    created_at: str
+
+
+# =============================================================================
+# Password Reset Schemas
+# =============================================================================
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str
+
+
+class MFASetupResponse(BaseModel):
+    secret: str
+    uri: str
+    qr_code_url: str
+
+
+class MFAVerifyRequest(BaseModel):
+    code: str
+
+
+class MFAChallengeRequest(BaseModel):
+    session_token: str
+    code: str
+
+
+class MFADisableRequest(BaseModel):
+    password: str
+
+
+class SessionInvalidateResponse(BaseModel):
+    message: str
+    new_token_version: int

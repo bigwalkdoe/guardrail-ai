@@ -1,0 +1,15 @@
+apiVersion: v2
+name: guardrail-ai
+description: Enterprise AI Governance Platform — Guardrail AI
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - ai-security
+  - guardrails
+  - governance
+  - cybersecurity
+home: https://guardrail-ai.com
+maintainers:
+  - name: Guardrail AI Team
+    email: support@guardrail-ai.com

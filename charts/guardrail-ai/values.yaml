@@ -1,0 +1,113 @@
+# Guardrail AI — Helm values
+# Override per environment (values-dev.yaml, values-prod.yaml)
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/bigwalkdoe/guardrail-ai
+  tag: latest
+  pullPolicy: Always
+
+config:
+  appEnv: production
+  logLevel: INFO
+  secretKey: ""  # MUST be overridden
+  encryptionKey: ""  # MUST be overridden
+  databaseUrl: ""  # MUST be overridden
+  redisUrl: "redis://guardrail-redis:6379/0"
+  neo4jUri: "bolt://guardrail-neo4j:7687"
+  neo4jPassword: ""
+  celeryBrokerUrl: "amqp://guest:guest@guardrail-rabbitmq:5672"
+  celeryResultBackend: "redis://guardrail-redis:6379/2"
+  sentryDsn: ""
+  allowedOrigins: "https://guardrail.example.com"
+  trustedHosts: "localhost,127.0.0.1,guardrail-ai-api"
+  rateLimitPerMinute: 60
+  dbPoolSize: 20
+  dbMaxOverflow: 30
+
+ingress:
+  enabled: true
+  className: nginx
+  host: guardrail.example.com
+  tls:
+    enabled: true
+    secretName: guardrail-ai-tls
+
+resources:
+  api:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 1Gi
+  celeryWorker:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 1Gi
+  frontend:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+postgresql:
+  enabled: true
+  auth:
+    database: guardrail
+    username: guardrail
+    password: ""
+  primary:
+    persistence:
+      size: 10Gi
+
+redis:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      size: 5Gi
+
+rabbitmq:
+  enabled: true
+  auth:
+    username: guest
+    password: guest
+  persistence:
+    size: 5Gi
+
+neo4j:
+  enabled: true
+  password: ""
+  persistence:
+    size: 10Gi
+
+monitoring:
+  prometheus:
+    enabled: true
+  grafana:
+    enabled: true
+    adminPassword: ""
+
+celery:
+  workerConcurrency: 8
+  maxTasksPerChild: 500
+
+autoscaling:
+  api:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  celeryWorker:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70

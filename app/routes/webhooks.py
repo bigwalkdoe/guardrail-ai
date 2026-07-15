@@ -1,9 +1,9 @@
 """
 Webhook Management Routes.
-Endpoints for creating and managing webhooks.
+Endpoints for creating, managing, and receiving webhooks.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from pydantic import BaseModel
@@ -11,7 +11,12 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.security import get_current_user
 from app.models import User
-from app.services.webhook_service import WebhookService, WebhookEvent
+from app.services.webhook_service import (
+    WebhookService,
+    WebhookEvent,
+    verify_incoming_webhook,
+    process_incoming_webhook,
+)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -92,6 +97,43 @@ def delete_webhook(
         raise HTTPException(status_code=404, detail="Webhook not found")
 
     return {"message": "Webhook deleted successfully"}
+
+
+@router.post("/receive/{provider}")
+async def receive_webhook(
+    provider: str,
+    request: Request,
+):
+    """Receive incoming webhook from external service.
+
+    Supported providers: slack, github, generic
+    """
+    body = await request.body()
+    headers = dict(request.headers)
+
+    secret_setting = getattr(settings, f"{provider.upper()}_WEBHOOK_SECRET", None)
+    if not secret_setting:
+        secret_setting = settings.SLACK_WEBHOOK_URL or ""
+
+    valid = verify_incoming_webhook(provider, body, headers, secret_setting)
+    if not valid:
+        logger.warning(f"Invalid webhook signature from {provider}")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    import json
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        payload = {"raw": body.decode(errors="replace")}
+
+    event = headers.get("X-GitHub-Event") or headers.get("X-Slack-Event") or payload.get("type", "unknown")
+    result = process_incoming_webhook(provider, event, payload)
+
+    # Slack URL verification challenge
+    if provider == "slack" and payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge")}
+
+    return result
 
 
 @router.post("/{webhook_id}/test")

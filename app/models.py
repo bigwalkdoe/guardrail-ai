@@ -50,6 +50,7 @@ class User(Base):
         String, default=UserRole.EMPLOYEE.value
     )  # admin, auditor, user - using enum for type safety
     department = Column(String, nullable=True)
+    token_version = Column(Integer, default=0)
     created_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
 
     # Relationships
@@ -469,3 +470,82 @@ class Webhook(Base):
 
     # Relationships
     user = relationship("User", back_populates="webhooks")
+
+
+# =============================================================================
+# Guardrail Models
+# =============================================================================
+
+
+class GuardrailLog(Base):
+    """Guardrail evaluation log for tracking prompt/output safety checks."""
+
+    __tablename__ = "guardrail_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    tool_id = Column(Integer, ForeignKey("ai_tools.id"), nullable=True)
+
+    prompt_hash = Column(String(64), index=True)
+    prompt_preview = Column(String(200))
+    evaluation_type = Column(String)  # prompt, output
+    risk_score = Column(Float, default=0.0)
+    action_taken = Column(String)  # allow, warn, block
+
+    injection_score = Column(Float, default=0.0)
+    pii_detected = Column(Boolean, default=False)
+    pii_types = Column(JSON, nullable=True)
+    policy_violations = Column(JSON, nullable=True)
+
+    latency_ms = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
+
+
+class GuardrailRule(Base):
+    """Custom guardrail rules for users to define their own patterns."""
+
+    __tablename__ = "guardrail_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True)
+    name = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    category = Column(String)  # injection, pii, policy, output
+    pattern = Column(String, nullable=False)  # regex pattern
+    action = Column(String, default="warn")  # allow, warn, block
+    severity = Column(String, default="medium")  # low, medium, high, critical
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
+
+
+# =============================================================================
+# Auth & Security Models
+# =============================================================================
+
+
+class PasswordResetToken(Base):
+    """Password reset tokens with expiration."""
+
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
+
+
+class UserMFASetting(Base):
+    """MFA/TOTP settings per user."""
+
+    __tablename__ = "user_mfa_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    totp_secret = Column(String, nullable=True)
+    is_enabled = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(tz=timezone.utc).replace(tzinfo=None))

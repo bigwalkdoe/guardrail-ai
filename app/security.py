@@ -207,6 +207,17 @@ def get_current_user(
     user = db.query(UserModel).filter(UserModel.email == email).first()
     if user is None:
         raise credentials_exception
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is disabled",
+        )
+    token_version = payload.get("token_version", 0)
+    if token_version < user.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session invalidated. Please log in again.",
+        )
     return user
 
 
@@ -236,6 +247,68 @@ def hash_api_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Password reset
+# ---------------------------------------------------------------------------
+
+RESET_TOKEN_BYTES = 32
+
+
+def generate_reset_token() -> str:
+    """Generate a cryptographically secure password-reset token."""
+    return secrets.token_urlsafe(RESET_TOKEN_BYTES)
+
+
+def hash_reset_token(token: str) -> str:
+    """Hash a reset token for DB storage."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# MFA session tokens (short-lived, for the 2nd factor challenge)
+# ---------------------------------------------------------------------------
+
+import uuid
+
+MFA_SESSION_EXPIRE_MINUTES = 5
+
+
+def encode_mfa_session_token(user_id: int) -> str:
+    """Short-lived JWT to carry the user through the MFA challenge step."""
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    payload = {
+        "sub": str(user_id),
+        "typ": "mfa_session",
+        "exp": now + timedelta(minutes=MFA_SESSION_EXPIRE_MINUTES),
+        "iat": now,
+        "jti": str(uuid.uuid4()),
+        "aud": settings.APP_NAME,
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_mfa_session_token(token: str) -> dict:
+    """Decode and validate an MFA session token."""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            audience=settings.APP_NAME,
+        )
+    except JWTError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid MFA session token: {str(e)}",
+        )
+    if payload.get("typ") != "mfa_session":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Expected MFA session token",
+        )
+    return payload
+
+
 def api_key_prefix(raw_key: str, length: int = 8) -> str:
     return raw_key[:length]
 
@@ -261,6 +334,7 @@ def create_access_token(
     to_encode["jti"] = str(uuid.uuid4())
     to_encode["typ"] = "access"
     to_encode["aud"] = settings.APP_NAME
+    to_encode["token_version"] = 0  # will be overridden by data if provided
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
@@ -285,6 +359,7 @@ def create_refresh_token(
     to_encode["jti"] = str(uuid.uuid4())
     to_encode["typ"] = "refresh"
     to_encode["aud"] = settings.APP_NAME
+    to_encode["token_version"] = 0
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 

@@ -17,16 +17,32 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.models import User
-from app.schemas import Token, UserCreate, UserResponse
+from app.models import User, PasswordResetToken, UserMFASetting
+from app.schemas import (
+    Token,
+    UserCreate,
+    UserResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    MFASetupResponse,
+    MFAVerifyRequest,
+    MFAChallengeRequest,
+    MFADisableRequest,
+    SessionInvalidateResponse,
+)
 from app.security import (
     create_access_token,
     create_refresh_token,
     set_auth_cookies,
+    clear_auth_cookies,
     get_current_user,
     generate_csrf_token,
     hash_password,
     verify_password,
+    generate_reset_token,
+    hash_reset_token,
+    encode_mfa_session_token,
+    decode_mfa_session_token,
 )
 
 # SAML is optional - import lazily to avoid hard dependency at module load
@@ -145,6 +161,232 @@ class LoginRequest(BaseModel):
     password: str
 
 
+# =============================================================================
+# Password Reset
+# =============================================================================
+
+
+@router.post("/forgot-password")
+def forgot_password(
+    req: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """Request a password reset token."""
+    user = db.query(User).filter(User.email == req.email).first()
+    if not user:
+        return {"message": "If the email exists, a reset link has been sent."}
+
+    raw_token = generate_reset_token()
+    hashed = hash_reset_token(raw_token)
+
+    expires_at = datetime.now(tz=timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+
+    record = PasswordResetToken(
+        user_id=user.id,
+        token_hash=hashed,
+        expires_at=expires_at,
+    )
+    db.add(record)
+    db.commit()
+
+    if settings.is_development:
+        return {
+            "message": "Reset token generated (dev mode)",
+            "token": raw_token,
+            "reset_url": f"/reset-password?token={raw_token}",
+        }
+
+    return {"message": "If the email exists, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+def reset_password(
+    req: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """Reset password using a valid token."""
+    hashed = hash_reset_token(req.token)
+    record = (
+        db.query(PasswordResetToken)
+        .filter(
+            PasswordResetToken.token_hash == hashed,
+            PasswordResetToken.used == False,
+            PasswordResetToken.expires_at > datetime.now(tz=timezone.utc).replace(tzinfo=None),
+        )
+        .first()
+    )
+    if not record:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    user = db.query(User).filter(User.id == record.user_id).first()
+    if not user:
+        raise HTTPException(status_code=400, detail="User not found")
+
+    try:
+        user.hashed_password = hash_password(req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    record.used = True
+    user.token_version += 1
+    db.commit()
+
+    return {"message": "Password reset successfully"}
+
+
+# =============================================================================
+# MFA / TOTP
+# =============================================================================
+
+
+def _get_totp_uri(user_email: str, secret: str) -> str:
+    return f"otpauth://totp/{settings.APP_NAME}:{user_email}?secret={secret}&issuer={settings.APP_NAME}"
+
+
+@router.post("/mfa/setup", response_model=MFASetupResponse)
+def setup_mfa(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generate TOTP secret and provisioning URI for authenticator app."""
+    import base64
+    import pyotp
+
+    mfa = db.query(UserMFASetting).filter(UserMFASetting.user_id == current_user.id).first()
+    if mfa and mfa.is_enabled:
+        raise HTTPException(status_code=400, detail="MFA is already enabled. Disable it first to re-setup.")
+
+    secret = pyotp.random_base32()
+    uri = _get_totp_uri(current_user.email, secret)
+
+    if not mfa:
+        mfa = UserMFASetting(user_id=current_user.id, totp_secret=secret)
+        db.add(mfa)
+    else:
+        mfa.totp_secret = secret
+        mfa.is_enabled = False
+    db.commit()
+
+    return MFASetupResponse(
+        secret=secret,
+        uri=uri,
+        qr_code_url=uri,
+    )
+
+
+@router.post("/mfa/verify")
+def verify_mfa(
+    req: MFAVerifyRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Verify a TOTP code to confirm MFA setup."""
+    import pyotp
+
+    mfa = db.query(UserMFASetting).filter(UserMFASetting.user_id == current_user.id).first()
+    if not mfa or not mfa.totp_secret:
+        raise HTTPException(status_code=400, detail="MFA not set up. Call /mfa/setup first.")
+
+    totp = pyotp.TOTP(mfa.totp_secret)
+    if not totp.verify(req.code):
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+
+    mfa.is_enabled = True
+    db.commit()
+
+    return {"message": "MFA enabled successfully"}
+
+
+@router.post("/mfa/disable")
+def disable_mfa(
+    req: MFADisableRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Disable MFA after verifying password."""
+    if not verify_password(req.password, current_user.hashed_password):
+        raise HTTPException(status_code=403, detail="Incorrect password")
+
+    mfa = db.query(UserMFASetting).filter(UserMFASetting.user_id == current_user.id).first()
+    if not mfa:
+        return {"message": "MFA was not enabled"}
+
+    db.delete(mfa)
+    db.commit()
+
+    return {"message": "MFA disabled successfully"}
+
+
+@router.post("/mfa/challenge", response_model=Token)
+def mfa_challenge(
+    req: MFAChallengeRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Complete MFA challenge and receive full JWT tokens."""
+    import pyotp
+
+    session_payload = decode_mfa_session_token(req.session_token)
+    user_id = int(session_payload.get("sub", 0))
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid session or user is inactive")
+
+    mfa = db.query(UserMFASetting).filter(
+        UserMFASetting.user_id == user_id,
+        UserMFASetting.is_enabled == True,
+    ).first()
+    if not mfa or not mfa.totp_secret:
+        raise HTTPException(status_code=400, detail="MFA not enabled for this user")
+
+    totp = pyotp.TOTP(mfa.totp_secret)
+    if not totp.verify(req.code, valid_window=1):
+        raise HTTPException(status_code=400, detail="Invalid MFA code")
+
+    csrf_token = generate_csrf_token()
+    access_token = create_access_token(data={
+        "sub": user.email,
+        "user_id": user.id,
+        "role": user.role,
+        "token_version": user.token_version,
+    })
+    refresh_token = create_refresh_token(data={
+        "sub": user.email,
+        "user_id": user.id,
+        "token_version": user.token_version,
+    })
+
+    set_auth_cookies(response, access_token, refresh_token, csrf_token=csrf_token)
+
+    return Token(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        csrf_token=csrf_token,
+    )
+
+
+# =============================================================================
+# Session Management
+# =============================================================================
+
+
+@router.post("/sessions/invalidate", response_model=SessionInvalidateResponse)
+def invalidate_sessions(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Invalidate all active sessions by incrementing token_version."""
+    current_user.token_version += 1
+    db.commit()
+
+    return SessionInvalidateResponse(
+        message="All sessions invalidated. Please log in again.",
+        new_token_version=current_user.token_version,
+    )
+
+
 @router.post("/login", response_model=Token)
 def login(
     request: Request,
@@ -188,9 +430,33 @@ def login(
             detail="Account is disabled",
         )
 
+    # Check MFA
+    mfa = db.query(UserMFASetting).filter(
+        UserMFASetting.user_id == user.id,
+        UserMFASetting.is_enabled == True,
+    ).first()
+    if mfa:
+        session_token = encode_mfa_session_token(user.id)
+        return Token(
+            access_token="",
+            refresh_token=None,
+            token_type="mfa_required",
+            csrf_token=session_token,
+            expires_in=300,
+        )
+
     csrf_token = generate_csrf_token()
-    access_token = create_access_token(data={"sub": user.email, "user_id": user.id, "role": user.role})
-    refresh_token = create_refresh_token(data={"sub": user.email, "user_id": user.id})
+    access_token = create_access_token(data={
+        "sub": user.email,
+        "user_id": user.id,
+        "role": user.role,
+        "token_version": user.token_version,
+    })
+    refresh_token = create_refresh_token(data={
+        "sub": user.email,
+        "user_id": user.id,
+        "token_version": user.token_version,
+    })
 
     clear_failed_attempts(email)
     set_auth_cookies(response, access_token, refresh_token, csrf_token=csrf_token)

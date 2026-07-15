@@ -138,22 +138,55 @@ class APIKeyService:
         return api_key
 
     def check_rate_limit(self, api_key: APIKey) -> bool:
-        """Check if API key has rate limit available."""
+        """Check if API key has rate limit available (sliding window via Redis)."""
         if not self._redis:
             return True
 
-        key = f"apikey_rate:{api_key.id}"
-        current = self._redis.get(key)
+        return self._check_sliding_window(f"apikey_rate:{api_key.id}", api_key.rate_limit, 60)
 
-        if current is None:
-            self._redis.setex(key, api_key.rate_limit_period, 1)
-            return True
+    def _check_sliding_window(self, key: str, max_requests: int, window_seconds: int = 60) -> bool:
+        """Sliding window rate limit check using Redis sorted sets."""
+        import time as time_module
+        now = time_module.time()
+        window_start = now - window_seconds
 
-        if int(current) >= api_key.rate_limit:
+        self._redis.zremrangebyscore(key, 0, window_start)
+        current = self._redis.zcard(key)
+
+        if current >= max_requests:
             return False
 
-        self._redis.incr(key)
+        self._redis.zadd(key, {str(now): now})
+        self._redis.expire(key, window_seconds * 2)
         return True
+
+    def get_rate_limit_info(self, key_id: int) -> Dict[str, Any]:
+        """Get current rate limit status for a key."""
+        api_key = self.db.query(APIKey).filter(APIKey.id == key_id).first()
+        if not api_key:
+            return {"error": "Key not found"}
+
+        remaining = api_key.rate_limit
+        reset = 60
+
+        if self._redis:
+            import time as time_module
+            now = time_module.time()
+            window_start = now - 60
+            key = f"apikey_rate:{api_key.id}"
+            self._redis.zremrangebyscore(key, 0, window_start)
+            current = self._redis.zcard(key)
+            remaining = max(0, api_key.rate_limit - current)
+            ttl = self._redis.ttl(key)
+            reset = max(0, int(ttl)) if ttl > 0 else 60
+
+        return {
+            "key_id": key_id,
+            "limit": api_key.rate_limit,
+            "remaining": remaining,
+            "reset_seconds": reset,
+            "window_seconds": 60,
+        }
 
     def list_keys(
         self,
@@ -204,3 +237,27 @@ class APIKeyService:
         self.db.delete(api_key)
         self.db.commit()
         return True
+
+    def rotate_key(self, key_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        """Rotate API key: generate a new key value while preserving metadata."""
+        api_key = self.db.query(APIKey).filter(APIKey.id == key_id).first()
+        if not api_key:
+            return None
+
+        new_key, new_prefix = self._generate_key()
+        new_hash = self._hash_key(new_key)
+
+        api_key.key_hash = new_hash
+        api_key.key_prefix = new_prefix
+        self.db.commit()
+
+        return {
+            "id": api_key.id,
+            "name": api_key.name,
+            "key": new_key,
+            "prefix": new_prefix,
+            "key_type": api_key.key_type,
+            "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
+            "rate_limit": api_key.rate_limit,
+            "created_at": api_key.created_at.isoformat(),
+        }

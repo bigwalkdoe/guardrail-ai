@@ -23,9 +23,11 @@ from app.routes import (
     incidents,
     config_scanner,
     network,
+    guardrails,
 )
 from app.security import get_current_user, require_admin
 from app.secret_validator import validate_secrets_on_startup
+from app.telemetry import setup_opentelemetry
 
 
 @asynccontextmanager
@@ -81,11 +83,9 @@ app = FastAPI(
     title=settings.APP_NAME,
     description="Guardrail AI - Enterprise Cybersecurity Operations Platform with integrated SOC",
     version="1.0.0",
-    docs_url=settings.DOCS_URL if not settings.is_production else None,
-    redoc_url=settings.REDOC_URL if not settings.is_production else None,
-    openapi_url=f"{settings.API_V1_PREFIX}/openapi.json"
-    if not settings.is_production
-    else None,
+    docs_url=settings.DOCS_URL,
+    redoc_url=settings.REDOC_URL,
+    openapi_url=f"{settings.API_V1_PREFIX}/openapi.json",
     lifespan=lifespan,
     contact={
         "name": "Guardrail AI Support",
@@ -99,6 +99,9 @@ app = FastAPI(
 
 # Setup security middleware
 setup_security_middleware(app)
+
+# Setup OpenTelemetry distributed tracing
+setup_opentelemetry(app)
 
 # Setup audit middleware
 setup_audit_middleware(app)
@@ -133,6 +136,20 @@ app.include_router(
 app.include_router(
     network.router, prefix=settings.API_V1_PREFIX, tags=["network-security"]
 )
+app.include_router(
+    guardrails.router, prefix=settings.API_V1_PREFIX, tags=["guardrails"]
+)
+
+
+@app.middleware("http")
+async def protect_docs_in_production(request: Request, call_next):
+    """Protect Swagger/ReDoc behind auth in production."""
+    if settings.is_production and request.url.path in {"/docs", "/redoc", "/openapi.json"}:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Authentication required for API docs"})
+    return await call_next(request)
 
 
 @app.get("/")

@@ -280,36 +280,14 @@ def setup_security_middleware(app):
                 IPFilterMiddleware, whitelist=whitelist, blacklist=blacklist
             )
 
-    # Setup rate limiting
+    # Setup tiered rate limiting (per-key + global fallback)
     try:
         from slowapi import Limiter
         from slowapi.util import get_remote_address
         from slowapi.errors import RateLimitExceeded
         from fastapi.responses import JSONResponse
 
-        if settings.REDIS_URL:
-            limiter = Limiter(
-                key_func=get_remote_address,
-                storage_uri=settings.REDIS_URL,
-                default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
-            )
-        else:
-            limiter = Limiter(
-                key_func=get_remote_address,
-                default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
-            )
-
-        app.state.limiter = limiter
-
-        @app.exception_handler(RateLimitExceeded)
-        async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "detail": "Rate limit exceeded",
-                    "retry_after": exc.detail if hasattr(exc, "detail") else 60,
-                },
-            )
+        _setup_tiered_rate_limiting(app)
     except ImportError:
         if settings.is_production:
             raise RuntimeError(
@@ -317,6 +295,70 @@ def setup_security_middleware(app):
                 "Install it: pip install slowapi"
             )
         logger.warning("slowapi not installed — rate limiting disabled (pip install slowapi)")
+
+
+def _setup_tiered_rate_limiting(app):
+    """Set up tiered rate limiting with per-API-key support via Redis."""
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    from fastapi.responses import JSONResponse
+
+    if settings.REDIS_URL:
+        limiter = Limiter(
+            key_func=get_remote_address,
+            storage_uri=settings.REDIS_URL,
+            default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
+        )
+    else:
+        limiter = Limiter(
+            key_func=get_remote_address,
+            default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
+        )
+
+    app.state.limiter = limiter
+
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "detail": "Rate limit exceeded",
+                "retry_after": exc.detail if hasattr(exc, "detail") else 60,
+            },
+        )
+
+    # Add per-API-key rate limiting as a middleware
+    @app.middleware("http")
+    async def apikey_rate_limit_middleware(request: Request, call_next):
+        api_key_header = request.headers.get("X-API-Key")
+        if api_key_header and settings.REDIS_URL:
+            try:
+                import hashlib
+                import redis as redis_client
+                r = redis_client.from_url(settings.REDIS_URL)
+
+                key_hash = hashlib.sha256(api_key_header.encode()).hexdigest()
+                limit_key = f"apikey_sliding:{key_hash}"
+
+                import time as time_module
+                now = time_module.time()
+                window_start = now - 60
+                r.zremrangebyscore(limit_key, 0, window_start)
+                current = r.zcard(limit_key)
+                r.zadd(limit_key, {str(now): now})
+                r.expire(limit_key, 120)
+
+                if current >= 1000:  # default max RPM
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": "API key rate limit exceeded", "retry_after": 60},
+                    )
+            except Exception:
+                pass
+
+        response = await call_next(request)
+        return response
 
 
 class AuditMiddleware(BaseHTTPMiddleware):

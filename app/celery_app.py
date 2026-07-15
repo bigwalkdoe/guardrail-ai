@@ -138,6 +138,12 @@ def get_celery_app() -> Celery:
                 "schedule": crontab(hour=5, minute=0),
                 "args": (),
             },
+            # Retention enforcement (daily at 3 AM)
+            "enforce-retention": {
+                "task": "app.tasks.maintenance.enforce_audit_retention",
+                "schedule": crontab(hour=3, minute=0),
+                "args": (),
+            },
         },
     )
 

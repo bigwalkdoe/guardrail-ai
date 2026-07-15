@@ -117,6 +117,30 @@ def delete_api_key(
     return {"message": "API key deleted successfully"}
 
 
+@router.post("/{key_id}/rotate")
+def rotate_api_key(
+    key_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Rotate API key: generate new key value while preserving metadata."""
+    service = APIKeyService(db)
+
+    keys = service.list_keys(
+        user_id=current_user.id if current_user.role != "admin" else None
+    )
+    key_ids = [k["id"] for k in keys]
+
+    if key_id not in key_ids and current_user.role != "admin":
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    result = service.rotate_key(key_id, current_user.id)
+    if not result:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    return result
+
+
 @router.post("/{key_id}/revoke")
 def revoke_api_key(
     key_id: int,
@@ -145,3 +169,23 @@ def verify_api_key(db: Session, api_key: str, ip_address: Optional[str] = None):
         return None
 
     return key
+
+
+@router.get("/{key_id}/rate-limit")
+def get_key_rate_limit(
+    key_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get current rate limit status for an API key."""
+    service = APIKeyService(db)
+
+    keys = service.list_keys(
+        user_id=current_user.id if current_user.role != "admin" else None
+    )
+    key_ids = [k["id"] for k in keys]
+
+    if key_id not in key_ids and current_user.role != "admin":
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    return service.get_rate_limit_info(key_id)
